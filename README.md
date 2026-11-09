@@ -14,6 +14,7 @@ En bas : la musique (graves). En haut : le message, invisible à l'oreille.
 
 ```sh
 make
+./tests.sh     # cache des damiers, les fait réapparaître et vérifie chaque quart de l'image
 ```
 
 Seulement du C et la libm : FFT, lecture/écriture WAV, PGM et PNG sont écrits à la main.
