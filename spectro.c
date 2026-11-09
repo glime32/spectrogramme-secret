@@ -32,6 +32,15 @@ static void *alloue(size_t n) {
     return p;
 }
 
+/* -1 si le fichier n'est pas positionnable (tube) */
+static long octets_restants(FILE *f) {
+    long ici = ftell(f);
+    if (ici < 0 || fseek(f, 0, SEEK_END)) return -1;
+    long fin = ftell(f);
+    if (fseek(f, ici, SEEK_SET)) meurt("lecture impossible", NULL);
+    return fin - ici;
+}
+
 /* ------------------------------------------------------------------ image */
 
 typedef struct {
@@ -50,8 +59,12 @@ static int lit_entier_pnm(FILE *f) {
         c = fgetc(f);
         if (c == '#') while (c != '\n' && c != EOF) c = fgetc(f);
     } while (c == ' ' || c == '\t' || c == '\n' || c == '\r');
-    if (c < '0' || c > '9') meurt("fichier PNM mal formé", NULL);
-    while (c >= '0' && c <= '9') { v = v * 10 + (c - '0'); c = fgetc(f); }
+    if (c < '0' || c > '9') meurt("fichier PNM mal formé ou tronqué", NULL);
+    while (c >= '0' && c <= '9') {
+        if (v > 9999999) meurt("nombre trop grand dans le fichier PNM", NULL);
+        v = v * 10 + (c - '0');
+        c = fgetc(f);
+    }
     return v;
 }
 
@@ -63,9 +76,15 @@ static Image image_lit_pnm(const char *chemin) {
     if (fread(m, 1, 2, f) != 2 || m[0] != 'P' || !strchr("2356", m[1]))
         meurt("format d'image non reconnu (PGM ou PPM attendu ; convertis avec : magick photo.png photo.pgm)", chemin);
     int w = lit_entier_pnm(f), h = lit_entier_pnm(f), maxv = lit_entier_pnm(f);
-    if (w <= 0 || h <= 0 || maxv <= 0 || maxv > 65535) meurt("dimensions d'image invalides", chemin);
+    if (w <= 0 || h <= 0 || w > 65536 || h > 65536) meurt("dimensions d'image invalides", chemin);
+    if (maxv <= 0 || maxv > 65535) meurt("valeur maximale invalide dans l'en-tête", chemin);
     int canaux = (m[1] == '3' || m[1] == '6') ? 3 : 1;
     int binaire = (m[1] == '5' || m[1] == '6');
+    /* en texte, chaque valeur prend au moins un chiffre et un séparateur */
+    size_t valeurs = (size_t)w * h * canaux;
+    size_t besoin = binaire ? valeurs * (maxv < 256 ? 1 : 2) : 2 * valeurs - 1;
+    long reste = octets_restants(f);
+    if (reste >= 0 && (size_t)reste < besoin) meurt("image tronquée (plus petite que la taille annoncée)", chemin);
     Image im = image_nouvelle(w, h);
     for (long i = 0; i < (long)w * h; i++) {
         double s = 0;
@@ -73,8 +92,12 @@ static Image image_lit_pnm(const char *chemin) {
             int v;
             if (!binaire) v = lit_entier_pnm(f);
             else if (maxv < 256) v = fgetc(f);
-            else { int a = fgetc(f); v = (a << 8) | fgetc(f); }
+            else {
+                int a = fgetc(f), b = fgetc(f);
+                v = (a < 0 || b < 0) ? -1 : a << 8 | b;
+            }
             if (v < 0) meurt("image tronquée", chemin);
+            if (v > maxv) meurt("valeur de pixel plus grande que le maximum annoncé", chemin);
             /* luminance perçue (Rec. 601) */
             s += (canaux == 3 ? (c == 0 ? 0.299 : c == 1 ? 0.587 : 0.114) : 1.0) * v;
         }
@@ -261,24 +284,35 @@ static Son wav_lit(const char *chemin) {
         uint32_t taille = le32(ch + 4);
         if (!memcmp(ch, "fmt ", 4)) {
             uint8_t fmt[64] = {0};
+            if (taille < 16) meurt("bloc fmt trop court", chemin);
             size_t lu = taille < sizeof fmt ? taille : sizeof fmt;
             if (fread(fmt, 1, lu, f) != lu) meurt("en-tête WAV tronqué", chemin);
-            if (taille > lu) fseek(f, taille - lu, SEEK_CUR);
-            format = le16(fmt); canaux = le16(fmt + 2); taux = (int)le32(fmt + 4); bits = le16(fmt + 14);
+            long saute = (long)(taille - lu) + (taille & 1);
+            if (saute && fseek(f, saute, SEEK_CUR)) meurt("en-tête WAV tronqué", chemin);
+            uint32_t hz = le32(fmt + 4);
+            format = le16(fmt); canaux = le16(fmt + 2); bits = le16(fmt + 14);
             if (format == 0xFFFE && taille >= 26) format = le16(fmt + 24); /* WAVE_FORMAT_EXTENSIBLE */
+            if (canaux < 1 || canaux > 64) meurt("nombre de canaux invalide", chemin);
+            if (hz == 0 || hz > 1000000) meurt("fréquence d'échantillonnage invalide", chemin);
+            taux = (int)hz;
         } else if (!memcmp(ch, "data", 4)) {
+            if (!canaux) meurt("bloc data avant le bloc fmt", chemin);
+            /* tolère un fichier coupé ou une taille 0xFFFFFFFF (enregistrement en direct) */
+            long reste = octets_restants(f);
+            if (reste >= 0 && taille > (uint32_t)reste) taille = (uint32_t)reste;
             data = alloue(taille);
-            data_n = (uint32_t)fread(data, 1, taille, f); /* tolère un fichier coupé */
+            data_n = (uint32_t)fread(data, 1, taille, f);
             break;
-        } else fseek(f, taille + (taille & 1), SEEK_CUR);
-        if (taille & 1 && memcmp(ch, "fmt ", 4) == 0) fseek(f, 1, SEEK_CUR);
+        } else if (fseek(f, (long)taille + (taille & 1), SEEK_CUR)) break;
     }
     fclose(f);
-    if (!data || !canaux || !taux) meurt("WAV sans données", chemin);
+    if (!canaux) meurt("WAV sans bloc fmt", chemin);
+    if (!data) meurt("WAV sans données", chemin);
     int octets = bits / 8;
     if (!((format == 1 && (bits == 8 || bits == 16 || bits == 24 || bits == 32)) || (format == 3 && bits == 32)))
         meurt("encodage WAV non géré (PCM 8/16/24/32 bits ou float 32 bits)", chemin);
     Son s = {taux, canaux, (long)(data_n / (octets * canaux)), NULL};
+    if (s.n == 0) meurt("WAV sans échantillons", chemin);
     s.ech = alloue(sizeof(float) * s.n * canaux);
     for (long i = 0; i < s.n * canaux; i++) {
         const uint8_t *b = data + i * octets;

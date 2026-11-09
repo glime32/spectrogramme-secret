@@ -72,5 +72,26 @@ fi
 resultat "fmin ≥ fmax : refusé"            sh -c "! ./spectro cacher -t A -o '$tmp/x.wav' --fmin 9000 --fmax 8000"
 resultat "--fft qui n'est pas 2^k : refusé" sh -c "! ./spectro reveler -i '$tmp/seul.wav' -o '$tmp/x.pgm' --fft 1000"
 
+refuse() { "$@" > /dev/null 2>&1; [ $? = 1 ]; } # message d'erreur, pas de plantage
+cacher_pgm() { printf "$1" > "$tmp/abime.pgm"; ./spectro cacher -i "$tmp/abime.pgm" -o "$tmp/x.wav"; }
+reveler_wav() { ./spectro reveler -i "$1" -o "$tmp/x.pgm"; }
+remplace() { # fichier position octets(printf) -> abime.wav, 4 octets remplacés
+  { head -c "$2" "$1"; printf "$3"; tail -c +$(($2 + 5)) "$1"; } > "$tmp/abime.wav"
+}
+
+resultat "PGM plus court que sa taille annoncée : refusé"  refuse cacher_pgm 'P5 40 20 255\n\377\377\377\377'
+resultat "PGM de 99999999999 pixels de large : refusé"     refuse cacher_pgm 'P5 99999999999 2 255\n\377\377'
+resultat "PGM avec un pixel au-dessus du maximum : refusé" refuse cacher_pgm 'P2 2 1 10\n5 11\n'
+resultat "PGM 16 bits coupé au milieu d'un pixel : refusé" refuse cacher_pgm 'P5 1 1 65535\n\377'
+printf 'RIFF\044\0\0\0WAVEfmt \004\0\0\0\001\0\001\0data\0\0\0\0' > "$tmp/abime.wav"
+resultat "WAV dont le bloc fmt est trop court : refusé"    refuse reveler_wav "$tmp/abime.wav"
+remplace "$tmp/seul.wav" 24 '\0\0\0\0'
+resultat "WAV à 0 Hz : refusé"                             refuse reveler_wav "$tmp/abime.wav"
+head -c 44 "$tmp/seul.wav" > "$tmp/vide.wav"
+resultat "WAV sans aucun échantillon : refusé"             refuse reveler_wav "$tmp/vide.wav"
+remplace "$tmp/seul.wav" 40 '\377\377\377\377'
+./spectro reveler -i "$tmp/abime.wav" -o "$tmp/direct.pgm" --fmin 500 --fmax 8000 2> /dev/null
+resultat "WAV de taille 0xFFFFFFFF (en direct) : lu en entier" cmp "$tmp/direct.pgm" "$tmp/seul.pgm"
+
 echo "$ok / $total"
 [ "$ok" = "$total" ]
